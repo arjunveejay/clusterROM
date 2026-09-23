@@ -1,0 +1,33 @@
+MIT License
+
+Copyright (c) 2026 Arjun Vijaywargiya
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+The reaction networks and shielding tables under networks/ are third-party
+data redistributed here for convenience, not covered by the licence above:
+
+  networks/nelson/            Nelson & Langer (1999), ApJ 524, 923
+  networks/osu_09_2008/       OSU gas-phase network, 2008 September release
+  networks/lee1996_shielding.dat
+                              Lee, Herbst, Millar, Roueff & Pineau des Forets
+                              (1996), A&A 311, 690
+
+Check each source's own terms before redistributing.

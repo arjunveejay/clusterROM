@@ -1,0 +1,20 @@
+# Python 3.9 or newer.
+#
+# The lower bounds are the versions that first carry an API this package uses,
+# not the oldest that happen to import:
+#
+#   scikit-learn 1.5  PCA(svd_solver="covariance_eigh"), the fallback when the
+#                     full SVD fails to converge on a rank-deficient block
+#                     (KMeans(n_init="auto") needs only 1.2)
+#   numpy 1.22        SeedSequence.spawn, which fixes the per-tolerance split
+#                     streams
+#   scipy 1.8         solve_ivp's BDF with a sparse Jacobian
+#   matplotlib 3.6    Axes.set_xticks(minor=True) on a shared axis
+#
+# Developed and verified against numpy 2.0.2, scipy 1.13.1, scikit-learn 1.6.1
+# and matplotlib 3.9.4 on Python 3.9.25.
+
+numpy>=1.22
+scipy>=1.8
+scikit-learn>=1.5
+matplotlib>=3.6
