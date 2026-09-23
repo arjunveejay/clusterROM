@@ -1,6 +1,7 @@
 experiments/**
 !experiments/**/
 !experiments/**/*.ipynb
+!experiments/**/figures/*
 .ipynb_checkpoints/
 experiments_real
 logs/
