@@ -9,5 +9,4 @@ src/__pycache__
 *.pyc
 datasets/grav_collapse/
 datasets/lorenz96/*/trajectories.npy
-examples/*/*/figures/
 README.md
