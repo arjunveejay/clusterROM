@@ -19,11 +19,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+import scipy.sparse as sp
 from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 from scipy.linalg import null_space
 
 from .evaluate import STATS, _stats
+from .lorenz96 import Lorenz96Network
 from .rom import apply_B_xy
 
 #: Cluster id for an interval integrated by the FOM, which routes to no cluster.
@@ -47,6 +49,8 @@ class HybridConfig:
         thresh=inf + positivity=True    -- positivity only
 
     ``force_fom`` integrates every interval at full order, the reference path for validating the window solver.
+
+    ``fom_atol``, ``fom_rtol`` and ``fom_min_scale`` govern the full-order windows and default to the values with which KIDApy generated the chemistry datasets. ``fom_atol`` applies to the scaled variables ``x / max(x_entry, fom_min_scale)``, not to the abundances.
     """
 
     lookback: int = 10
@@ -54,6 +58,9 @@ class HybridConfig:
     thresh: float = 1e-4
     positivity: bool = True
     force_fom: bool = False
+    fom_atol: float = 1e-6
+    fom_rtol: float = 1e-3
+    fom_min_scale: float = 1e-22
 
     def __post_init__(self):
         if self.lookback < 0:
@@ -69,6 +76,9 @@ class HybridConfig:
             raise ValueError(
                 f"thresh must be > 0 (use math.inf to disable the rewind); "
                 f"got {self.thresh!r}")
+        for name in ("fom_atol", "fom_rtol", "fom_min_scale"):
+            if not getattr(self, name) > 0.0:
+                raise ValueError(f"{name} must be > 0; got {getattr(self, name)!r}")
 
     @property
     def rewind_enabled(self):
@@ -77,7 +87,9 @@ class HybridConfig:
     def summary(self):
         return (f"HybridConfig(lookback={self.lookback}, n_fom={self.n_fom}, "
                 f"thresh={self.thresh:g}, positivity={self.positivity}, "
-                f"force_fom={self.force_fom})")
+                f"force_fom={self.force_fom}, fom_atol={self.fom_atol:g}, "
+                f"fom_rtol={self.fom_rtol:g}, "
+                f"fom_min_scale={self.fom_min_scale:g})")
 
 
 # ---------------------------------------------------------------------------
@@ -432,15 +444,39 @@ class RomIntervalSolver:
                             pos_entry=applied_entry, pos_endpoint=applied_end)
 
 
+def _scale_operators(A, B, s):
+    """``(A, B)`` in the coordinates ``z = x / s``, as KIDApy's ``QuadraticSolver.solve`` forms them."""
+    N = s.size
+    s_inv = 1.0 / s
+    A_sc = sp.diags(s_inv, format="csr") @ A.tocsr() @ sp.diags(s, format="csr")
+    if B.nnz == 0:
+        return A_sc, B
+    Bcoo = B.tocoo(copy=False)
+    bi = Bcoo.row.astype(np.int64, copy=False)
+    bj = (Bcoo.col // N).astype(np.int64, copy=False)
+    bk = (Bcoo.col % N).astype(np.int64, copy=False)
+    B_sc = sp.coo_matrix(
+        (Bcoo.data * s[bj] * s[bk] * s_inv[bi], (Bcoo.row, Bcoo.col)),
+        shape=B.shape, dtype=np.float64).tocsr()
+    return A_sc, B_sc
+
+
 class FomWindowSolver:
     """A run of hydro intervals integrated at full order. Built once per tracer.
 
-    The only full-order solve in the package: the dataset's trajectories are read, not integrated.
+    The only full-order solve in the package: the dataset's trajectories are read, not integrated. Each interval is solved as KIDApy's piecewise-constant tracer solve generated the chemistry datasets: in the coordinates ``z = x / max(x_entry, fom_min_scale)``, rescaled at every knot. No Jacobian is passed: on networks of a few dozen species, BDF's finite-difference Jacobian with dense LU is faster than the analytic sparse one with sparse LU.
+
+    Raises ``NotImplementedError`` for Lorenz-96, whose signed state admits no such scaling.
     """
 
-    def __init__(self, ens, cfg, pt, dt_hydro, t_eval=None):
+    def __init__(self, ens, cfg, pt, dt_hydro, t_eval=None, hybrid=None):
+        if isinstance(ens.network, Lorenz96Network):
+            raise NotImplementedError(
+                "FomWindowSolver solves in coordinates scaled by the positive "
+                "abundances and is not defined for the signed Lorenz-96 state")
         self.ens = ens
         self.cfg = cfg
+        self.hybrid = hybrid or HybridConfig()
         self.pt = np.asarray(pt, dtype=np.float64)
         self.dt = float(dt_hydro)
         self.t_eval = None if t_eval is None else np.asarray(t_eval, dtype=np.float64)
@@ -448,30 +484,44 @@ class FomWindowSolver:
         self.n_solves = 0
 
     def step_window(self, k0, k1, x):
-        """One full-order solve across intervals ``[k0, k1]`` inclusive.
+        """Full-order solve across intervals ``[k0, k1]`` inclusive, one scaled solve per interval.
 
-        Operators are constant within an interval and jump at each knot, so the RHS indexes them by ``t`` and ``max_step=dt`` keeps the integrator from stepping across a jump with the wrong ones.
+        Operators are constant within an interval and jump at each knot, so each interval is a separate solve, and its scale is taken from the state entering it.
         """
         net = self.ens.network
-        ops = [net.operators(net.env(self.pt[k])) for k in range(k0, k1 + 1)]
-        lo, hi = k0 * self.dt, (k1 + 1) * self.dt
-
-        def rhs(t, s):
-            A, B = ops[min(int(t / self.dt), len(ops) - 1)]
-            return np.asarray(A @ s).ravel() + apply_B_xy(s, s, B)
-
+        h = self.hybrid
+        x = np.asarray(x, dtype=np.float64)
+        N = x.size
+        ts, ys = [], []
         t0 = time.perf_counter()
-        sol = solve_ivp(rhs, (0.0, hi - lo), x, method=self.cfg.ode_method,
-                        atol=self.cfg.atol, rtol=self.cfg.rtol,
-                        t_eval=_window_eval(self.t_eval, lo, hi),
-                        max_step=self.dt)
+        for k in range(k0, k1 + 1):
+            A, B = net.operators(net.env(self.pt[k]))
+            s = np.maximum(x, h.fom_min_scale)
+            A_sc, B_sc = _scale_operators(A, B, s)
+            te = _window_eval(self.t_eval, k * self.dt, (k + 1) * self.dt)
+            if te is not None:
+                # A stored knot can land a few ULPs outside the span, which solve_ivp rejects outright.
+                te = np.clip(te, 0.0, self.dt)
+            sol = solve_ivp(
+                lambda _t, z: np.asarray(A_sc @ z).ravel() + apply_B_xy(z, z, B_sc),
+                (0.0, self.dt), x / s, method=self.cfg.ode_method,
+                atol=h.fom_atol, rtol=h.fom_rtol, t_eval=te)
+            if sol.status != 0:
+                self.solve_seconds += time.perf_counter() - t0
+                return IntervalStep(
+                    np.array([]), np.empty((N, 0)), FOM, x,
+                    failure=f"window {k0}-{k1}: FOM solve failed in interval "
+                            f"{k} -- {sol.message}")
+            tt, yy = sol.t + k * self.dt, s[:, None] * sol.y
+            # Consecutive intervals share their knot; keep it once so extend_window splits the window cleanly.
+            if ts and tt.size and np.isclose(tt[0], ts[-1][-1]):
+                tt, yy = tt[1:], yy[:, 1:]
+            ts.append(tt)
+            ys.append(yy)
+            x = s * sol.y[:, -1]
         self.solve_seconds += time.perf_counter() - t0
-        if sol.status != 0:
-            return IntervalStep(
-                np.array([]), np.empty((np.size(x), 0)), FOM, np.asarray(x),
-                failure=f"window {k0}-{k1}: FOM solve failed -- {sol.message}")
         self.n_solves += 1
-        return IntervalStep(sol.t + lo, sol.y, FOM, sol.y[:, -1])
+        return IntervalStep(np.concatenate(ts), np.hstack(ys), FOM, x)
 
 
 class _Intervals:
@@ -564,7 +614,7 @@ def solve_hybrid(ens, cfg, pt, x0, dt_hydro, t_eval=None, hybrid=None):
 
     rom = RomIntervalSolver(ens, cfg, dt, t_eval=t_eval,
                             positivity=hybrid.positivity)
-    fom = FomWindowSolver(ens, cfg, pt, dt, t_eval=t_eval)
+    fom = FomWindowSolver(ens, cfg, pt, dt, t_eval=t_eval, hybrid=hybrid)
 
     iv = _Intervals(x0)
     triggered = set()
@@ -713,7 +763,7 @@ def tracer_diagnostics(result):
         "max_trigger_resid": (float(result.trigger_resid.max())
                               if result.trigger_resid.size else float("nan")),
         "n_intervals_done": int(result.n_intervals),
-        # Calls to the full-order integrator: neither rewinds (force_fom makes none) nor n_fom_intervals (one call spans a window).
+        # Full-order windows solved: neither rewinds (force_fom makes none) nor n_fom_intervals (one window spans several intervals).
         "fom_solves": int(result.n_fom_solves),
         "rom_solves": int(result.n_rom_solves),
         "rom_discarded": int(result.n_rom_discarded),

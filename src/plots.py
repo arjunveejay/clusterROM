@@ -321,7 +321,7 @@ def _panel_global(ax_sc, sc_df, qoi, n_eval, agg="l2-in-time",
     # Same mask, so the rank label sits exactly above the eta it maps to and the twin axis cannot crowd where the bottom one was thinned.
     rank_ax.set_xticklabels([f"{int(r)}" if k else ""
                              for r, k in zip(rank_sc, _keep)])
-    rank_ax.set_xlabel("Basis size")
+    rank_ax.set_xlabel("Basis size (global)")
     rank_ax.xaxis.set_minor_locator(plt.NullLocator())
     rank_ax.tick_params(axis="x", labelsize=sc_tick_fs)
     rank_ax.grid(False)
@@ -469,7 +469,7 @@ def _panel_ensemble(ax_cl, df, tols, dark, qoi, n_eval, twin_tol,
     cl_rank_ax.set_xticks(cl_x)
     cl_rank_ax.set_xticklabels([f"{r:.1f}" for r in cl_rank])
     twin_color = dark.get(twin_tol, TOL_PAIRS[0][1])
-    cl_rank_ax.set_xlabel("Mean basis size", color=twin_color)
+    cl_rank_ax.set_xlabel("Mean basis size (clustered)", color=twin_color)
     cl_rank_ax.tick_params(axis="x", colors=twin_color)
     cl_rank_ax.xaxis.label.set_color(twin_color)
     cl_rank_ax.grid(False)
@@ -632,7 +632,7 @@ def sweep_panel_splits(df_train, sc_train, df_test, sc_test, qoi,
                         hybrid_legend_loc="lower left", share_ylim=True,
                         caption_headroom=3.0, star_sizes=None,
                         star_legend_color=None, max_clusters_caption=True,
-                        tick_fs=20, twin_tick_fs=18):
+                        tick_fs=20, twin_tick_fs=18, row_gap=0.0):
     """The sweep summary with a training row above the test row.
 
     Rows 1 and 2 are the global and clustered error panels, drawn once per dataset; row 3 is the partition diagnostics. Those two describe the fit, which is trained on the training dataset whatever the ROM is later evaluated over, so they are drawn once from the testing frame -- the training frame carries identical ``n_clusters``, ``n_unsplittable`` and ``mean_rank``.
@@ -642,6 +642,8 @@ def sweep_panel_splits(df_train, sc_train, df_test, sc_test, qoi,
     ``n_eval_train`` and ``n_eval_test`` are separate on purpose. They are the denominators of the failure-rate captions, and passing one value for both scales an entire row's percentages silently, since the figure still draws.
 
     ``share_ylim`` puts both global panels on one error axis and both clustered panels on another, so a row-to-row comparison is not reading two different scales. Turn it off to let each row size to its own data.
+
+    ``row_gap`` is additional vertical space, as a fraction of the figure height, between the training and testing rows. It is taken in equal parts from the height of the three rows, so the figure margins and the other row spacing are unchanged.
     """
     use_paper_style()
     qoi = list(qoi)
@@ -706,10 +708,36 @@ def sweep_panel_splits(df_train, sc_train, df_test, sc_test, qoi,
 
     fig.subplots_adjust(left=0.08, right=0.98, bottom=0.06, top=0.94,
                         wspace=0.20, hspace=0.45)
+    if row_gap:
+        _widen_first_gap(fig, axes, row_gap)
     if savepath:
         fig.savefig(savepath, dpi=200, bbox_inches="tight")
         print(f"saved figure -> {savepath}")
     return fig, axes
+
+
+def _widen_first_gap(fig, axes, gap):
+    """Add ``gap`` (figure fraction) between the first two rows of ``axes``.
+
+    Each row loses ``gap / n_rows`` of height; the top of the first row, the bottom of the last row and every other inter-row gap are preserved. Twin axes share their host's position, so every axes in the figure whose vertical extent matches a row is moved with it.
+    """
+    n = axes.shape[0]
+    rows = [axes[r, 0].get_position() for r in range(n)]
+    h = rows[0].height - gap / n
+    if h <= 0:
+        raise ValueError(f"row_gap={gap} leaves no height for the panels")
+    # Stack from the bottom up: the last row keeps its bottom edge, each row above keeps its original gap to the one below, and the first gap is widened by `gap`.
+    y0 = [0.0] * n
+    y0[-1] = rows[-1].y0
+    for r in range(n - 2, -1, -1):
+        orig = rows[r].y0 - rows[r + 1].y1
+        y0[r] = y0[r + 1] + h + orig + (gap if r == 0 else 0.0)
+    for ax in fig.axes:
+        b = ax.get_position()
+        for r, row in enumerate(rows):
+            if np.isclose(b.y0, row.y0) and np.isclose(b.height, row.height):
+                ax.set_position([b.x0, y0[r], b.width, h])
+                break
 
 
 PANEL_KEYS = {"global_train": (0, 0), "clustered_train": (0, 1),
@@ -1364,12 +1392,17 @@ def etas_on_disk(sweep_dir, taus, label="on", eval_split="test"):
 def violin_panel(sweep_dir, taus, qoi, etas=None, label="on",
                  eval_split="test", agg="l2-in-time", floor=1e-16, ylim=None,
                  figsize=(15, 20), fs=28, eta_fs=24, stride=2,
-                 err_label=r"$L^2$ error", savepath=None):
+                 err_label=r"$L^2$ error", savepath=None, rank_df=None,
+                 rank_label="Mean basis size", rank_labelpad=12):
     """Per-tracer error distribution vs eta, one row per QoI, one column per tau.
 
     Reads the per-combo ``pertracer_*.csv`` files the sweep already wrote; nothing is re-solved, so changing ``etas`` or ``qoi`` is a redraw.
 
     Each violin is the distribution of ``log10`` per-tracer error over the tracers that completed; the solid rule is the median and the dashed one the p95. A summary statistic alone cannot say whether a bad mean is a heavy tail or a uniform shift, which is what these show.
+
+    ``rank_df`` is a sweep frame carrying ``mean_rank`` per ``(tau_split, eta)``, such as the one passed to :func:`sweep_panel_splits`. When given, each top-row panel receives a twin x axis that labels every kept violin with the mean basis size of its tolerance and eta; an eta absent from the frame is left unlabelled. ``rank_labelpad`` is the gap in points between that axis's tick labels and its label.
+
+    Each tolerance is captioned inside the top right of its top-row panel, where the errors are smallest and the violins leave room. The y axis is shared within a row only, so each quantity is scaled to its own error range; ``ylim``, when given, applies to every panel.
     """
     taus = list(taus)
     qoi = list(qoi)
@@ -1382,7 +1415,7 @@ def violin_panel(sweep_dir, taus, qoi, etas=None, label="on",
 
     use_paper_style()
     fig, axes = plt.subplots(len(qoi), len(taus), figsize=figsize,
-                             sharex=True, sharey=True, squeeze=False)
+                             sharex=True, sharey="row", squeeze=False)
     colors = plt.get_cmap("viridis")(np.linspace(0.15, 0.85, len(etas)))
 
     for j, tau in enumerate(taus):
@@ -1425,7 +1458,8 @@ def violin_panel(sweep_dir, taus, qoi, etas=None, label="on",
                 ax.hlines(np.percentile(d, 95), x - 0.36, x + 0.36,
                           color="k", lw=1.4, ls=(0, (2, 2)))
             if i == 0:
-                ax.set_title(rf"$\tau={tau:g}$")
+                ax.text(0.97, 0.95, rf"$\tau={tau:g}$", transform=ax.transAxes,
+                        ha="right", va="top", fontsize=fs, zorder=6)
             if j == 0:
                 ax.set_ylabel(f"{q}\n" + rf"$\log_{{10}}$ {err_label or agg}")
             if ylim:
@@ -1445,16 +1479,41 @@ def violin_panel(sweep_dir, taus, qoi, etas=None, label="on",
         ax.set_xlabel(r"$\eta$", fontsize=fs)
         ax.tick_params(axis="x", which="major", labelsize=eta_fs)
         ax.tick_params(axis="x", which="minor", length=3)
+    twins = []
+    if rank_df is not None:
+        # The twin axis carries the same kept positions as the eta axis, so each basis-size label sits over the violin whose eta is labelled below it.
+        for tau, host in zip(taus, axes[0]):
+            eta_r, rank_r = rank_series(rank_df, tau)
+
+            def _label(eta):
+                hit = np.isclose(eta_r, eta, rtol=1e-6, atol=0.0)
+                r = rank_r[hit][0] if hit.any() else np.nan
+                return f"{r:.1f}" if np.isfinite(r) else ""
+
+            tw = host.twiny()
+            tw.set_xlim(host.get_xlim())
+            tw.set_xticks([k + 1 for k in keep])
+            tw.set_xticklabels([_label(etas[k]) for k in keep])
+            tw.set_xticks(np.arange(1, len(etas) + 1), minor=True)
+            tw.set_xlabel(rank_label, fontsize=eta_fs, labelpad=rank_labelpad)
+            tw.tick_params(axis="x", which="major", labelsize=eta_fs)
+            tw.tick_params(axis="x", which="minor", length=3)
+            tw.grid(False)
+            twins.append((host, tw))
     for ax in axes.ravel():
         ax.tick_params(axis="y", labelsize=fs)
         ax.yaxis.label.set_fontsize(fs)
-        ax.title.set_fontsize(fs)
 
     fig.tight_layout()
     handles = [Line2D([], [], color="k", lw=1.8),
                Line2D([], [], color="k", lw=1.4, ls=(0, (2, 2)))]
+    # Anchored to the top of the drawn top row, twin axes included, rather than the figure edge, since tight_layout leaves a margin above it that would otherwise separate the legend from the panels.
+    renderer = fig.canvas.get_renderer()
+    top = max(ax.get_tightbbox(renderer).y1
+              for ax in [*axes[0], *(tw for _, tw in twins)])
+    top = fig.transFigure.inverted().transform((0.0, top))[1]
     fig.legend(handles, ["median", "p95"], ncol=2, frameon=False,
-               loc="lower right", bbox_to_anchor=(1.0, 1.0), fontsize=eta_fs)
+               loc="lower right", bbox_to_anchor=(1.0, top), fontsize=eta_fs)
     if savepath:
         fig.savefig(savepath, bbox_inches="tight")
         plt.close(fig)
